@@ -82,7 +82,11 @@ class WeiboSender(object):
             time.sleep(10)
         return pids.strip()
 
-    def upload_image_stream(self, image_url):
+    def upload_image_stream(self, img_fn: str) -> Optional[str]:
+        '''
+        Upload image file to weibo server, and reurn pid.
+        :param img_fn: str, filename to an image.
+        '''
         if ADD_WATERMARK:
             url = "http://picupload.service.weibo.com/interface/pic_upload.php?\
             app=miniblog&data=1&url=" \
@@ -95,9 +99,8 @@ class WeiboSender(object):
             rotate=0&app=miniblog&s=json&mime=image/jpeg&data=1&wm="
 
         # self.http.headers["Content-Type"] = "application/octet-stream"
-        image_name = image_url
         try:
-            f = self.session.get(image_name, timeout=30)
+            f = self.session.get(img_fn, timeout=30)
             img = f.content
             resp = self.session.post(url, data=img)
             upload_json = re.search('{.*}}', resp.text).group(0)
