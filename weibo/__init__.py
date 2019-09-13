@@ -1,4 +1,4 @@
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 from requests import Session
 from logger import logger
 import requests
@@ -8,8 +8,11 @@ import json
 import rsa
 import binascii
 import time
+import pickle
 
-from weibo_message import WeiboMessage
+from .weibo_message import WeiboMessage
+
+MAX_IMAGES = 9
 
 
 def encrypt_passwd(
@@ -27,10 +30,11 @@ class Weibo:
     To initialize, pass username and password to login,
     or pass a session.
     '''
-    def __init__(self, username: Optional[str], password: Optional[str]):
+    def __init__(self, username: str, password: str, session: str = ''):
         '''
         Login and save the session and uid.
-        :param usr/pwd: Optional[str], username and password for login.
+        :param usr/pwd: str, Optional[str], username and password for login.
+        :param session: str, pickle file of saved session.
         '''
         self.username = username
         self.password = password
@@ -39,28 +43,56 @@ class Weibo:
             'AppleWebKit/536.11 (KHTML, like Gecko) '
             'Chrome/20.0.1132.57 Safari/536.11'
         )
-        self.webclient = 'ssologin.js(v1.4.18)'
-        # self.session, self.uid = self.login(self.username, self.password)
-        self.session = self.login(self.username, self.password)
 
-        self.login_url = 'http://login.sina.com.cn/sso/prelogin.php?entry=weibo'\
-                         '&callback=sinaSSOController.preloginCallBack&' \
-                         'su=%s&rsakt=mod&checkpin=1&client=%s' % \
-                         (base64.b64encode(username.encode('utf-8')), self.webclient) 
+        self.wc = 'ssologin.js(v1.4.18)'
+        self.su = base64.b64encode(
+            requests.utils.quote(username).encode('utf-8')
+        )
+
+        self.login_url = \
+            'http://login.sina.com.cn/sso/prelogin.php?'\
+            'entry=weibo&callback=sinaSSOController.preloginCallBack'\
+            f'&su={self.su}&rsakt=mod&checkpin=1&client={self.wc}'
+        self.login_data_url = \
+            'http://weibo.com/ajaxlogin.php?framelogin=1'\
+            '&callback=parent.sinaSSOController.feedBackUrlCallBack',
+        self.login_list_url = \
+            f'http://login.sina.com.cn/sso/login.php?client={self.wc}'
+
+        if session:
+            with open(session, 'rb') as f:
+                self.session = pickle.load(f)
+        else:
+            self.session = self.login(self.username, self.password)
+
+    @property
+    def rt_url(self):
+        t = int(time.time() * 100)
+        return f'https://www.weibo.com/aj/v6/mblog/forward?ajwvr=6&__rnd={t}'
+
+    @property
+    def tw_url(self):
+        t = int(time.time() * 100)
+        return 'https://www.weibo.com/aj/mblog/add?'\
+               f'ajwvr=6&domain=100505&__rnd={t}'
+
+    @property
+    def pic_url(self):
+        t = int(time.time())
+        url = 'http://picupload.service.weibo.com/interface/pic_upload.php?'\
+              'mime=image%2Fjpeg&data=base64&url=0&markpos=1&logo=&nick=0&'\
+              'marks=1&app=miniblog&cb=http://weibo.com/aj/static/'\
+              f'upimgback.html?_wv=5&callback=STK_ijax_{t}'
+        return url
+
     def login(self, username: str, password: str) -> Session:
         session = requests.session()
         session.headers['User-Agent'] = self.user_agent
-        resp = session.get(
-            'http://login.sina.com.cn/sso/prelogin.php?'
-            'entry=weibo&callback=sinaSSOController.preloginCallBack&'
-            'su=%s&rsakt=mod&checkpin=1&client=%s' %
-            (base64.b64encode(username.encode('utf-8')), self.webclient)
-        )
+        resp = session.get(self.login_url)
 
         # Read json data between `{}` from response
         pre_login_str = re.match(r'[^{]+({.+?})', resp.text).group(1)
         pre_login = json.loads(pre_login_str)
-        su = base64.b64encode(requests.utils.quote(username).encode('utf-8')),
         sp = encrypt_passwd(
             password, pre_login['pubkey'],
             pre_login['servertime'], pre_login['nonce']
@@ -72,7 +104,7 @@ class Weibo:
             'savestate': 7,
             'userticket': 1,
             'ssosimplelogin': 1,
-            'su': su,
+            'su': self.su,
             'service': 'miniblog',
             'servertime': pre_login['servertime'],
             'nonce': pre_login['nonce'],
@@ -83,40 +115,36 @@ class Weibo:
             'rsakv': pre_login['rsakv'],
             'encoding': 'UTF-8',
             'prelt': '53',
-            'url': 'http://weibo.com/ajaxlogin.php?framelogin=1'
-                   '&callback=parent.sinaSSOController.feedBackUrlCallBack',
+            'url': self.login_data_url,
             'returntype': 'META'
         }
 
-        login_url_list = 'http://login.sina.com.cn/sso/' \
-                         + f'login.php?client={self.webclient}'
-
-        resp = session.post(login_url_list, data=data)
-        logger.debug(resp.text)
+        resp = session.post(self.login_list_url, data=data)
         match_obj = re.search('replace\\(\'([^\']+)\'\\)', resp.text)
         if match_obj is None:
-            logger.info('登录失败，请检查登录信息')
-            return (None, None)
+            logger.info('Failed to login!')
+            return None
 
         login_url = match_obj.group(1)
         resp = session.get(login_url)
-        # login_str = login_str = re.search('\((\{.*\})\)', resp.text).group(1)
         login_str = login_str = re.search('\((\{.*\})\)', resp.text).group(1)
         login_info = json.loads(login_str)
         logger.info('login success：[%s]', str(login_info))
         uid = login_info['userinfo']['uniqueid']
         session.headers['Referer'] = f'http://www.weibo.com/u/{uid}/home?wvr=5'
-        # return (session, uid)
+        with open('login.sess', 'wb') as f:
+            pickle.dump(session, f)
         return session
 
     def retweet(self, wb_msg: WeiboMessage) -> Tuple[bool, Dict]:
+        '''
+        :param wb_msg: WeiboMessage, 
+        '''
         if wb_msg.is_empty:
             logger.info('The weibo message is empty!')
             return
         data = wb_msg.get_rt_data()
-        t = int(time.time() * 100)
-        rt_url = f'https://www.weibo.com/aj/v6/mblog/forward?ajwvr=6&__rnd={t}'
-        res = self.session.post(rt_url, data=data)
+        res = self.session.post(self.rt_url, data=data)
         try:
             res = json.loads(res.text)
         except Exception:
@@ -132,29 +160,26 @@ class Weibo:
             succ = False
         return succ, res
 
-    def send_weibo(self, weibo) -> Tuple[bool, Dict]:
+    def tweet(self, weibo: WeiboMessage) -> Tuple[bool, Dict]:
         if weibo.is_empty:
             logger.info('没有获得信息，不发送')
             return
 
         data = weibo.get_send_data()
-        self.session.headers["Referer"] = self.Referer
-        send_url = "https://www.weibo.com/aj/mblog/add?\
-                    ajwvr=6&domain=100505&__rnd=%d" % int(time.time() * 1000)
-        res = self.session.post(send_url, data=data)
+        res = self.session.post(self.tw_url, data=data)
         try:
             res = json.loads(res.text)
         except Exception:
             res = {'code': '-1', 'msg': res.text}
+
         code: str = res['code']
         succ: bool = False
         if code == '100000':
-            logger.info('微博[%s]发送成功' % str(weibo))
+            logger.info('Sucessed! %s' % str(weibo))
             succ = True
         else:
-            logger.info('微博[%s]发送失败: %s: %s', str(weibo), code, res['msg'])
+            logger.info('Failed! %s: %s', code, res['msg'])
             succ = False
-            # raise Exception(f'Failed to send weibo: {res["msg"]}')
         return succ, res
 
     def upload_images(self, images):
@@ -168,24 +193,13 @@ class Weibo:
             time.sleep(10)
         return pids.strip()
 
-    def upload_image_stream(self, image_url):
-        if ADD_WATERMARK:
-            url = "http://picupload.service.weibo.com/interface/pic_upload.php?\
-            app=miniblog&data=1&url=" \
-                + WATERMARK_URL + "&markpos=1&logo=1&nick=" \
-                + WATERMARK_NIKE + \
-                "&marks=1&mime=image/jpeg&ct=0.5079312645830214"
-
-        else:
-            url = "http://picupload.service.weibo.com/interface/pic_upload.php?\
-            rotate=0&app=miniblog&s=json&mime=image/jpeg&data=1&wm="
-
-        # self.http.headers["Content-Type"] = "application/octet-stream"
-        image_name = image_url
+    def upload_image_stream(self, img_fn):
+        url = self.pic_url
+        image_name = img_fn
         try:
-            f = self.session.get(image_name, timeout=30)
-            img = f.content
-            resp = self.session.post(url, data=img)
+            with open(img_fn, 'rb') as f:
+                img = base64.b64encode(f.read())
+            resp = self.session.post(url, data={'b64_data': img})
             upload_json = re.search('{.*}}', resp.text).group(0)
             result = json.loads(upload_json)
             code = result["code"]
@@ -195,10 +209,3 @@ class Weibo:
         except Exception:
             logger.info(u"图片上传失败：%s" % image_name)
         return None
-
-
-
-    # if __name__ == '__main__':
-    #     (http, uid) = wblogin()
-    #     text = http.get('http://weibo.com/').text
-    #     print(text)

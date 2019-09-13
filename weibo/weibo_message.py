@@ -1,27 +1,22 @@
-# -*- coding: utf-8 -*-
-from typing import Optional, List
 import os
 
 
 class WeiboMessage(object):
     """weibo message struct"""
-    def __init__(self, text: str, images: Optional[List[str]] = None):
+    def __init__(self, text: str, pids: str = '', rt_mid: str = ''):
         '''
         :param text: str, text to send.
         :param images: Optional[List[str]], a list of image URLs.
         '''
         super(WeiboMessage, self).__init__()
-        self.text = text
         # self.text = self.text.replace('@', 'rp @'+u'\ufeff')
-        self.images = images
-        self.pids = ""
-        self.rt = False
-        self.rt_mid = ""
-        self.pids = ""
+        self.text = text
+        self.pids = pids
+        self.rt_mid = rt_mid
 
     @property
     def has_image(self):
-        return self.images is not None and len(self.images) > 0
+        return bool(self.pids)
 
     @property
     def is_empty(self):
@@ -29,11 +24,17 @@ class WeiboMessage(object):
 
     @property
     def is_retweet(self):
-        return self.rt
+        return bool(self.rt_mid)
 
-    def get_send_data(self):
-        # if not pids:
-        #     pids = self.pids
+    @property
+    def data(self):
+        if self.is_retweet:
+            return self.retweet_data
+        else:
+            return self.tweet_data
+
+    @property
+    def tweet_data(self):
         data = {
             "location": "v6_content_home",
             "appkey": "",
@@ -49,11 +50,8 @@ class WeiboMessage(object):
         }
         return data
 
-    def get_rt_data(self):
-        # if not pids:
-        #     pids = self.pids
-        # if not mid:
-        #     mid = '4380981861287509',
+    @property
+    def retweet_data(self):
         data = {
             "location": "page_100505_home",
             "appkey": "",
@@ -75,4 +73,4 @@ class WeiboMessage(object):
 
     def __str__(self):
         return "text: " + self.text + os.linesep \
-            + "images: " + str(self.images)
+            + "images: " + self.pids
